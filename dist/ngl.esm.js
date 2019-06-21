@@ -54539,9 +54539,9 @@ TiledRenderer.prototype._renderTile = function _renderTile (i) {
     viewer.camera.setViewOffset(width * factor, height * factor, offsetX, offsetY, width, height);
     viewer.render();
     if (this._antialias) {
-        var rx = (offsetX % 2) * (width % 2);
-        var ry = (offsetY % 2) * (height % 2);
-        this._ctx.drawImage(viewer.renderer.domElement, Math.floor(offsetX / 2) + rx, Math.floor(offsetY / 2) + ry, Math.ceil(width / 2) - rx, Math.ceil(height / 2) - ry);
+        var w = Math.round((offsetX + width) / 2) - Math.round(offsetX / 2);
+        var h = Math.round((offsetY + height) / 2) - Math.round(offsetY / 2);
+        this._ctx.drawImage(viewer.renderer.domElement, Math.round(offsetX / 2), Math.round(offsetY / 2), w, h);
     }
     else {
         this._ctx.drawImage(viewer.renderer.domElement, Math.floor(offsetX), Math.floor(offsetY), Math.ceil(width), Math.ceil(height));
@@ -64174,6 +64174,35 @@ function transpose(At, A) {
             { atd[pAt] = ad[Ai + j]; }
     }
 }
+// C = A * B
+function multiply(C, A, B) {
+    var i = 0;
+    var j = 0;
+    var k = 0;
+    var Ap = 0;
+    var pA = 0;
+    var pB = 0;
+    var _pB = 0;
+    var Cp = 0;
+    var ncols = A.cols;
+    var nrows = A.rows;
+    var mcols = B.cols;
+    var ad = A.data;
+    var bd = B.data;
+    var cd = C.data;
+    var sum = 0.0;
+    for (; i < nrows; Ap += ncols, i++) {
+        for (_pB = 0, j = 0; j < mcols; Cp++, _pB++, j++) {
+            pB = _pB;
+            pA = Ap;
+            sum = 0.0;
+            for (k = 0; k < ncols; pA++, pB += mcols, k++) {
+                sum += ad[pA] * bd[pB];
+            }
+            cd[Cp] = sum;
+        }
+    }
+}
 // C = A * B'
 function multiplyABt(C, A, B) {
     var i = 0;
@@ -64297,16 +64326,6 @@ function subRows(A, row) {
     for (var i = 0, p = 0; i < nrows; ++i) {
         for (var j = 0; j < ncols; ++j, ++p) {
             Ad[p] -= row[j];
-        }
-    }
-}
-function addRows(A, row) {
-    var nrows = A.rows;
-    var ncols = A.cols;
-    var Ad = A.data;
-    for (var i = 0, p = 0; i < nrows; ++i) {
-        for (var j = 0; j < ncols; ++j, ++p) {
-            Ad[p] += row[j];
         }
     }
 }
@@ -76834,10 +76853,11 @@ var Superposition = function Superposition(atoms1, atoms2) {
     var coords2 = new Matrix(3, n);
     this.coords1t = new Matrix(n, 3);
     this.coords2t = new Matrix(n, 3);
+    this.transformationMatrix = new Matrix4();
     this.c.data.set([1, 0, 0, 0, 1, 0, 0, 0, -1]);
     // prep coords
-    this.prepCoords(atoms1, coords1, n);
-    this.prepCoords(atoms2, coords2, n);
+    this.prepCoords(atoms1, coords1, n, false);
+    this.prepCoords(atoms2, coords2, n, false);
     // superpose
     this._superpose(coords1, coords2);
 };
@@ -76858,23 +76878,66 @@ Superposition.prototype._superpose = function _superpose (coords1, coords2) {
         multiply3x3(this.tmp, this.c, this.VH);
         multiply3x3(this.R, this.U, this.tmp);
     }
+    //get the transformation matrix
+    var transformMat_ = new Matrix(4, 4);
+    var tmp_1 = new Matrix(4, 4);
+    var tmp_2 = new Matrix(4, 4);
+    var sub = new Matrix(4, 4);
+    var mult = new Matrix(4, 4);
+    var add = new Matrix(4, 4);
+    var R = this.R.data;
+    var M1 = this.mean1;
+    var M2 = this.mean2;
+    sub.data.set([1, 0, 0, -M1[0],
+        0, 1, 0, -M1[1],
+        0, 0, 1, -M1[2],
+        0, 0, 0, 1]);
+    mult.data.set([R[0], R[1], R[2], 0,
+        R[3], R[4], R[5], 0,
+        R[6], R[7], R[8], 0,
+        0, 0, 0, 1]);
+    add.data.set([1, 0, 0, M2[0],
+        0, 1, 0, M2[1],
+        0, 0, 1, M2[2],
+        0, 0, 0, 1]);
+    transpose(tmp_1, sub);
+    multiplyABt(transformMat_, mult, tmp_1);
+    transpose(tmp_2, transformMat_);
+    multiplyABt(tmp_1, add, tmp_2);
+    transpose(transformMat_, tmp_1);
+    this.transformationMatrix.elements = transformMat_.data;
 };
-Superposition.prototype.prepCoords = function prepCoords (atoms, coords, n) {
+Superposition.prototype.prepCoords = function prepCoords (atoms, coords, n, is4X4) {
     var i = 0;
-    var n3 = n * 3;
     var cd = coords.data;
+    var c = 3;
+    var d = n * 3;
+    if (is4X4) {
+        d = n * 4;
+        c = 4;
+    }
     if (atoms instanceof Structure) {
         atoms.eachAtom(function (a) {
-            if (i < n3) {
+            if (i < d) {
                 cd[i + 0] = a.x;
                 cd[i + 1] = a.y;
                 cd[i + 2] = a.z;
-                i += 3;
+                if (is4X4)
+                    { cd[i + 3] = 1; }
+                i += c;
             }
         });
     }
     else if (atoms instanceof Float32Array) {
-        cd.set(atoms.subarray(0, n3));
+        for (; i < d; i += c) {
+            if (i < d) {
+                cd[i] = atoms[i];
+                cd[i + 1] = atoms[i + 1];
+                cd[i + 2] = atoms[i + 2];
+                if (is4X4)
+                    { cd[i + 3] = 1; }
+            }
+        }
     }
     else {
         Log.warn('prepCoords: input type unknown');
@@ -76892,31 +76955,57 @@ Superposition.prototype.transform = function transform (atoms) {
     else {
         return;
     }
-    var coords = new Matrix(3, n);
-    var tmp = new Matrix(n, 3);
+    var coords = new Matrix(4, n);
+    var tCoords = new Matrix(n, 4);
     // prep coords
-    this.prepCoords(atoms, coords, n);
+    this.prepCoords(atoms, coords, n, true);
+    // check for transformation matrix correctness
+    var transform = this.transformationMatrix;
+    var det = transform.determinant();
+    if (!det) {
+        return det;
+    }
     // do transform
-    subRows(coords, this.mean1);
-    multiplyABt(tmp, this.R, coords);
-    transpose(coords, tmp);
-    addRows(coords, this.mean2);
+    var mult = new Matrix(4, 4);
+    mult.data = transform.elements;
+    multiply(tCoords, coords, mult);
     var i = 0;
-    var cd = coords.data;
+    var cd = tCoords.data;
     if (atoms instanceof Structure) {
         atoms.eachAtom(function (a) {
-            a.x = cd[i + 0];
+            a.x = cd[i];
             a.y = cd[i + 1];
             a.z = cd[i + 2];
-            i += 3;
+            i += 4;
         });
+        //update transformation matrices for each assembly
+        var invertTrasform = new Matrix4();
+        invertTrasform.getInverse(transform);
+        var biomolDict = atoms.biomolDict;
+        for (var key in biomolDict) {
+            if (biomolDict.hasOwnProperty(key)) {
+                var assembly = biomolDict[key];
+                assembly.partList.forEach(function (part) {
+                    part.matrixList.forEach(function (mat) {
+                        mat.premultiply(transform);
+                        mat.multiply(invertTrasform);
+                    });
+                });
+            }
+        }
     }
     else if (atoms instanceof Float32Array) {
-        atoms.set(cd.subarray(0, n * 3));
+        var n4 = n * 4;
+        for (; i < n4; i += 4) {
+            atoms[i] = cd[i];
+            atoms[i + 1] = cd[i + 1];
+            atoms[i + 2] = cd[i + 2];
+        }
     }
     else {
         Log.warn('transform: input type unknown');
     }
+    return this.transformationMatrix;
 };
 
 /**
@@ -78499,8 +78588,9 @@ function superpose(s1, s2, align, sele1, sele2) {
         atoms2 = sviewCa2;
     }
     var superpose = new Superposition(atoms1, atoms2);
-    superpose.transform(s1);
+    var result = superpose.transform(s1);
     s1.refreshPosition();
+    return result;
 }
 
 /**
@@ -79699,6 +79789,69 @@ Stage.prototype.dispose = function dispose () {
     this.tasks.dispose();
     this.viewer.dispose();
 };
+
+/**
+ * @file Shape Component
+ * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @private
+ */
+/**
+ * Component wrapping a {@link Shape} object
+ *
+ * @example
+ * // get a shape component by adding a shape object to the stage
+ * var shape = new NGL.Shape( "shape" );
+ * shape.addSphere( [ 0, 0, 0 ], [ 1, 0, 0 ], 1.5 );
+ * var shapeComponent = stage.addComponentFromObject( shape );
+ * shapeComponent.addRepresentation( "buffer" );
+ */
+var ShapeComponent = (function (Component$$1) {
+    function ShapeComponent(stage, shape, params) {
+        if ( params === void 0 ) params = {};
+
+        Component$$1.call(this, stage, shape, Object.assign({ name: shape.name }, params));
+        this.shape = shape;
+    }
+
+    if ( Component$$1 ) ShapeComponent.__proto__ = Component$$1;
+    ShapeComponent.prototype = Object.create( Component$$1 && Component$$1.prototype );
+    ShapeComponent.prototype.constructor = ShapeComponent;
+
+    var prototypeAccessors = { type: { configurable: true } };
+    /**
+     * Component type
+     * @type {String}
+     */
+    prototypeAccessors.type.get = function () { return 'shape'; };
+    /**
+     * Add a new shape representation to the component
+     * @param {String} type - the name of the representation, one of:
+     *                        buffer.
+     * @param {BufferRepresentationParameters} params - representation parameters
+     * @return {RepresentationComponent} the created representation wrapped into
+     *                                   a representation component object
+     */
+    ShapeComponent.prototype.addRepresentation = function addRepresentation (type, params) {
+        if ( params === void 0 ) params = {};
+
+        return this._addRepresentation(type, this.shape, params);
+    };
+    ShapeComponent.prototype.getBoxUntransformed = function getBoxUntransformed () {
+        return this.shape.boundingBox;
+    };
+    ShapeComponent.prototype.getCenterUntransformed = function getCenterUntransformed () {
+        return this.shape.center;
+    };
+    ShapeComponent.prototype.dispose = function dispose () {
+        this.shape.dispose();
+        Component$$1.prototype.dispose.call(this);
+    };
+
+    Object.defineProperties( ShapeComponent.prototype, prototypeAccessors );
+
+    return ShapeComponent;
+}(Component));
+ComponentRegistry.add('shape', ShapeComponent);
 
 /**
  * @file Atomindex Colormaker
@@ -81112,69 +81265,6 @@ var VolumeColormaker = (function (Colormaker$$1) {
     return VolumeColormaker;
 }(Colormaker));
 ColormakerRegistry$1.add('volume', VolumeColormaker);
-
-/**
- * @file Shape Component
- * @author Alexander Rose <alexander.rose@weirdbyte.de>
- * @private
- */
-/**
- * Component wrapping a {@link Shape} object
- *
- * @example
- * // get a shape component by adding a shape object to the stage
- * var shape = new NGL.Shape( "shape" );
- * shape.addSphere( [ 0, 0, 0 ], [ 1, 0, 0 ], 1.5 );
- * var shapeComponent = stage.addComponentFromObject( shape );
- * shapeComponent.addRepresentation( "buffer" );
- */
-var ShapeComponent = (function (Component$$1) {
-    function ShapeComponent(stage, shape, params) {
-        if ( params === void 0 ) params = {};
-
-        Component$$1.call(this, stage, shape, Object.assign({ name: shape.name }, params));
-        this.shape = shape;
-    }
-
-    if ( Component$$1 ) ShapeComponent.__proto__ = Component$$1;
-    ShapeComponent.prototype = Object.create( Component$$1 && Component$$1.prototype );
-    ShapeComponent.prototype.constructor = ShapeComponent;
-
-    var prototypeAccessors = { type: { configurable: true } };
-    /**
-     * Component type
-     * @type {String}
-     */
-    prototypeAccessors.type.get = function () { return 'shape'; };
-    /**
-     * Add a new shape representation to the component
-     * @param {String} type - the name of the representation, one of:
-     *                        buffer.
-     * @param {BufferRepresentationParameters} params - representation parameters
-     * @return {RepresentationComponent} the created representation wrapped into
-     *                                   a representation component object
-     */
-    ShapeComponent.prototype.addRepresentation = function addRepresentation (type, params) {
-        if ( params === void 0 ) params = {};
-
-        return this._addRepresentation(type, this.shape, params);
-    };
-    ShapeComponent.prototype.getBoxUntransformed = function getBoxUntransformed () {
-        return this.shape.boundingBox;
-    };
-    ShapeComponent.prototype.getCenterUntransformed = function getCenterUntransformed () {
-        return this.shape.center;
-    };
-    ShapeComponent.prototype.dispose = function dispose () {
-        this.shape.dispose();
-        Component$$1.prototype.dispose.call(this);
-    };
-
-    Object.defineProperties( ShapeComponent.prototype, prototypeAccessors );
-
-    return ShapeComponent;
-}(Component));
-ComponentRegistry.add('shape', ShapeComponent);
 
 /**
  * @file Structure Representation
@@ -100757,7 +100847,7 @@ var UIStageParameters = {
     mousePreset: SelectParam.apply(void 0, Object.keys(MouseActionPresets))
 };
 
-var version$1 = "2.0.0-dev.35";
+var version$1 = "2.0.0-dev.36";
 
 /**
  * @file Version
@@ -100779,5 +100869,5 @@ if (!window.Promise) {
     window.Promise = Promise$1;
 }
 
-export { Version, StaticDatasource, MdsrvDatasource, Colormaker, Selection, PdbWriter, SdfWriter, StlWriter, Stage, Collection, ComponentCollection, RepresentationCollection, Assembly, TrajectoryPlayer, Superposition, Frames, Queue, Counter, BufferRepresentation, ArrowBuffer, BoxBuffer, ConeBuffer, CylinderBuffer, EllipsoidBuffer, MeshBuffer, OctahedronBuffer, PointBuffer, SphereBuffer, TetrahedronBuffer, TextBuffer, TorusBuffer, WideLineBuffer as WidelineBuffer, Shape$1 as Shape, Structure, Kdtree$1 as Kdtree, SpatialHash, MolecularSurface, Volume, MouseActions, KeyActions, Debug, setDebug, MeasurementDefaultParams, setMeasurementDefaultParams, ScriptExtensions, ColormakerRegistry$1 as ColormakerRegistry, DatasourceRegistry, DecompressorRegistry, ParserRegistry$1 as ParserRegistry, RepresentationRegistry, setListingDatasource, setTrajectoryDatasource, ListingDatasource, TrajectoryDatasource, autoLoad, getDataInfo, getFileInfo, superpose, guessElement, concatStructures, flatten$1 as flatten, throttle, download, getQuery, uniqueArray, LeftMouseButton, MiddleMouseButton, RightMouseButton, signals_1 as Signal, Matrix3, Matrix4, Vector2, Vector3, Box3, Quaternion, Euler, Plane, Color, UIStageParameters };
+export { Version, StaticDatasource, MdsrvDatasource, Colormaker, Selection, PdbWriter, SdfWriter, StlWriter, Stage, Collection, ComponentCollection, RepresentationCollection, Component, ShapeComponent, StructureComponent, SurfaceComponent, VolumeComponent, Assembly, TrajectoryPlayer, Superposition, Frames, Queue, Counter, BufferRepresentation, ArrowBuffer, BoxBuffer, ConeBuffer, CylinderBuffer, EllipsoidBuffer, MeshBuffer, OctahedronBuffer, PointBuffer, SphereBuffer, TetrahedronBuffer, TextBuffer, TorusBuffer, WideLineBuffer as WidelineBuffer, Shape$1 as Shape, Structure, Kdtree$1 as Kdtree, SpatialHash, MolecularSurface, Volume, MouseActions, KeyActions, Debug, setDebug, MeasurementDefaultParams, setMeasurementDefaultParams, ScriptExtensions, ColormakerRegistry$1 as ColormakerRegistry, DatasourceRegistry, DecompressorRegistry, ParserRegistry$1 as ParserRegistry, RepresentationRegistry, setListingDatasource, setTrajectoryDatasource, ListingDatasource, TrajectoryDatasource, autoLoad, getDataInfo, getFileInfo, superpose, guessElement, concatStructures, flatten$1 as flatten, throttle, download, getQuery, uniqueArray, LeftMouseButton, MiddleMouseButton, RightMouseButton, signals_1 as Signal, Matrix3, Matrix4, Vector2, Vector3, Box3, Quaternion, Euler, Plane, Color, UIStageParameters };
 //# sourceMappingURL=ngl.esm.js.map
